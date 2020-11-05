@@ -75,7 +75,9 @@ class DashShakaPlayback extends HTML5Video {
   }
 
   getCurrentTime() {
-    return this.shakaPlayerInstance.getMediaElement().currentTime - this.seekRange.start
+    return this.shakaPlayerInstance
+      ? this.shakaPlayerInstance.getMediaElement().currentTime - this.seekRange.start
+      : 0
   }
 
   get _startTime() {
@@ -83,7 +85,14 @@ class DashShakaPlayback extends HTML5Video {
   }
 
   get presentationTimeline() {
-    return this.shakaPlayerInstance.getManifest().presentationTimeline
+    // Manifest may equals null (for example, source load failure)
+    let manifest = this.shakaPlayerInstance
+      ? this.shakaPlayerInstance.getManifest()
+      : null
+
+    return manifest
+      ? manifest.presentationTimeline
+      : null
   }
 
   get bandwidthEstimate() {
@@ -101,7 +110,11 @@ class DashShakaPlayback extends HTML5Video {
   }
 
   getProgramDateTime() {
-    return new Date((this.presentationTimeline.getPresentationStartTime() + this.seekRange.start) * 1000)
+    let presentationStartTime = this.presentationTimeline
+      ? this.presentationTimeline.getPresentationStartTime()
+      : null
+
+    return new Date((presentationStartTime + this.seekRange.start) * 1000)
   }
 
   _updateDvr(status) {
@@ -127,7 +140,10 @@ class DashShakaPlayback extends HTML5Video {
 
   play () {
     if (!this._player) {
-      this._setup()
+      // User interaction is lost when Shaka instance load() fetch the manifest
+      // Calling consent() before setup Shaka instance fix this issue (Safari browser on macOS)
+      this.consent()
+      process.nextTick(() => this._setup())
     }
 
     if (!this.isReady) {
@@ -180,15 +196,13 @@ class DashShakaPlayback extends HTML5Video {
   // skipping HTML5Video `_setupSrc` (on tag video)
   _setupSrc () {}
 
-  // skipping ready event on video tag in favor of ready on shaka
   _ready () {
-    // override with no-op
+    this.trigger(Events.PLAYBACK_READY, this.name)
   }
 
   _onShakaReady() {
     this._isShakaReadyState = true
     this.trigger(DashShakaPlayback.Events.SHAKA_READY)
-    this.trigger(Events.PLAYBACK_READY, this.name)
   }
 
   get isReady () {
@@ -424,11 +438,46 @@ class DashShakaPlayback extends HTML5Video {
     this._checkForClosedCaptions()
   }
 
-  _fillLevels () {
-    if (this._levels.length === 0) {
-      this._levels = this.videoTracks.map((videoTrack) => { return {id: videoTrack.id, label: `${videoTrack.height}p`} }).reverse()
-      this.trigger(Events.PLAYBACK_LEVELS_AVAILABLE, this.levels)
+  _hasMultipleLanguages() {
+    let lang
+    let tracks = this.videoTracks
+
+    for (let i = 0; i < tracks.length; ++i) {
+      if (i === 0) {
+        lang = tracks[i].language
+        continue
+      }
+
+      if (lang !== tracks[i].language)
+        return true
     }
+
+    return false
+  }
+
+  _fillLevels () {
+    if (this._levels.length !== 0)
+      return
+
+    // If multiple language available, add it to label
+    let labelWithLanguage = this._hasMultipleLanguages()
+
+    this._levels = this.videoTracks.map((videoTrack) => {
+      return {
+        id: videoTrack.id,
+        level: videoTrack,
+        label: labelWithLanguage ? `${videoTrack.bandwidth/1000}Kbps - ${videoTrack.language}` : `${videoTrack.bandwidth/1000}Kbps`,
+      }
+    })
+
+    if (labelWithLanguage)
+      // Sort by language ASC, bandwidth DESC
+      this._levels.sort((a, b) => (a.level.language > b.level.language) ? 1 : (a.level.language === b.level.language) ? ((a.level.bandwidth < b.level.bandwidth) ? 1 : -1) : -1 )
+    else
+      // Sort by bandwidth DESC
+      this._levels.sort((a, b) => (a.level.bandwidth < b.level.bandwidth) ? 1 : -1)
+
+    this.trigger(Events.PLAYBACK_LEVELS_AVAILABLE, this.levels)
   }
 
   _startToSendStats () {
